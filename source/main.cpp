@@ -1,6 +1,7 @@
-#include "router.hpp"
-#include "window.hpp"
 #include "font.cpp"
+#include "router.hpp"
+#include "resource.h"
+#include "window.hpp"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -340,11 +341,18 @@ static int ImGui_ImplWin32_CreateVkSurface(ImGuiViewport* viewport, ImU64 vk_ins
     return (int)vkCreateWin32SurfaceKHR((VkInstance)vk_instance, &createInfo, (VkAllocationCallbacks*)vk_allocator, (VkSurfaceKHR*)out_vk_surface);
 }
 
-int main(int, char**)
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
 {
+
     // Create application window
     //ImGui_ImplWin32_EnableDpiAwareness();
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"DX7 MIDI Bridge ImGui App", nullptr };
+
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIconSm = (HICON)LoadImageW(
+        hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+
     ::RegisterClassExW(&wc);
     HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"DX7 MIDI Bridge", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
 

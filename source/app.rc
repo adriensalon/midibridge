@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// Put your .ico next to this file, or adjust the path
+IDI_APPICON ICON "app.ico"
