@@ -133,7 +133,7 @@ void draw_library_window()
         if (ImGui::Begin(IMGUID("Library"))) {
 
             static int selectedBank, selectedPatch = -1;
-            static std::vector<sysex_bank> _banks = load_sysex_banks_recursive(setup_library_directory);
+            static std::vector<std::filesystem::path> _banks = load_sysex_banks_recursive(setup_library_directory);
 
             ImGuiTableFlags tblFlags = ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV;
 
@@ -144,7 +144,7 @@ void draw_library_window()
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < (int)_banks.size(); ++i) {
-                    const sysex_bank& bank = _banks[i];
+                    const std::string bank = _banks[i].filename().string();
 
                     // --- bank row ---
                     ImGui::TableNextRow();
@@ -156,11 +156,11 @@ void draw_library_window()
                         tflags |= ImGuiTreeNodeFlags_Selected;
 
                     // Use a stable ID separate from the label (pointer-as-ID pattern)
-                    bool open = ImGui::TreeNodeEx((void*)(intptr_t)(i + 1), tflags, "%s", bank.name.c_str());
+                    bool open = ImGui::TreeNodeEx((void*)(intptr_t)(i + 1), tflags, "%s", bank.c_str());
 
                     // Column 1: patch count
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::Text("%d", (int)bank.patches.size());
+                    ImGui::Text("%d", 32);
 
                     // Row click selection behavior for the bank itself
                     // (clicking the label toggles the node, clicking empty row selects)
@@ -172,8 +172,9 @@ void draw_library_window()
 
                     // --- patch rows when expanded ---
                     if (open) {
-                        for (int j = 0; j < (int)bank.patches.size(); ++j) {
-                            const auto& patch = bank.patches[j];
+                        std::vector<sysex_patch> _patches = load_sysex_patches(_banks[selectedBank]);
+                        for (int j = 0; j < _patches.size(); ++j) {
+                            const auto& patch = _patches[j];
 
                             ImGui::TableNextRow();
                             ImGui::TableSetColumnIndex(0);
@@ -189,7 +190,7 @@ void draw_library_window()
                             if (ImGui::IsItemClicked()) {
                                 selectedBank = i;
                                 selectedPatch = j;
-                                send_to_hardware_output(_banks[selectedBank].patches[selectedPatch].data);
+                                send_to_hardware_output(_patches[selectedPatch].data);
                             }
 
                             ImGui::TableSetColumnIndex(1);

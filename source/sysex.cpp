@@ -1,7 +1,9 @@
 #include "sysex.hpp"
 
 #include <fstream>
+
 namespace {
+
 std::vector<unsigned char> read_all(const std::filesystem::path& p)
 {
     std::ifstream f(p, std::ios::binary);
@@ -16,41 +18,25 @@ std::vector<unsigned char> read_all(const std::filesystem::path& p)
     return buf;
 }
 
-// First F0..F7 block in a buffer
-std::vector<unsigned char> first_sysex(const std::vector<unsigned char>& buf)
-{
-    size_t i = 0;
-    while (i < buf.size() && buf[i] != 0xF0)
-        ++i;
-    if (i >= buf.size())
-        return {};
-    size_t s = i++;
-    while (i < buf.size() && buf[i] != 0xF7)
-        ++i;
-    if (i < buf.size())
-        return std::vector<unsigned char>(buf.begin() + s, buf.begin() + i + 1);
-    return {};
-}
-
-inline size_t yamaha_count(const std::vector<unsigned char>& msg)
+std::size_t yamaha_count(const std::vector<unsigned char>& msg)
 {
     if (msg.size() < 7)
         return 0;
     return (size_t(msg[4]) << 7) | size_t(msg[5]); // MS7 | LS7
 }
 
-inline bool is_yamaha(const std::vector<unsigned char>& msg) { return msg.size() >= 2 && msg[0] == 0xF0 && msg[1] == 0x43; }
+bool is_yamaha(const std::vector<unsigned char>& msg) { return msg.size() >= 2 && msg[0] == 0xF0 && msg[1] == 0x43; }
 
-inline bool is_dx7_bank32(const std::vector<unsigned char>& msg)
+bool is_dx7_bank32(const std::vector<unsigned char>& msg)
 {
     return is_yamaha(msg) && msg.size() >= 7 && msg[3] == 0x09 && yamaha_count(msg) == 4096;
 }
-inline bool is_dx7_single_voice_msg(const std::vector<unsigned char>& msg)
+
+bool is_dx7_single_voice_msg(const std::vector<unsigned char>& msg)
 {
     return is_yamaha(msg) && msg.size() >= 7 && msg[3] == 0x00 && yamaha_count(msg) == 155;
 }
 
-// ASCII 10-char from 128-unsigned char chunk at bytes 118..127
 std::string name_from_chunk(const unsigned char* chunk128)
 {
     std::string s((const char*)chunk128 + 118, 10);
@@ -63,6 +49,29 @@ std::string name_from_chunk(const unsigned char* chunk128)
         s = "Voice";
     return s;
 }
+
+static std::string name_from_single_voice_msg(const std::vector<unsigned char>& msg)
+{
+    // F0 43 0n 00 01 1B [155 params] chk F7
+    if (msg.size() >= 6 + 155 + 1 + 1) {
+        const unsigned char* params = msg.data() + 6;
+        std::string s((const char*)params + (155 - 10), 10); // bytes 145..154
+        for (char& c : s) if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E) c = ' ';
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        if (!s.empty()) return s;
+    }
+    // Fallback: scan anywhere
+    for (size_t i = 0; i + 10 <= msg.size(); ++i) {
+        bool ok = true;
+        for (size_t k = 0; k < 10; ++k) {
+            unsigned char c = msg[i+k];
+            if (c < 0x20 || c > 0x7E) { ok = false; break; }
+        }
+        if (ok) return std::string((const char*)&msg[i], 10);
+    }
+    return "Voice";
+}
+
 
 // checksum = (128 - (sum & 0x7F)) & 0x7F
 unsigned char yamaha_checksum(const unsigned char* data, size_t len)
@@ -205,10 +214,33 @@ std::vector<unsigned char> build_single_voice_sysex_from_params(const std::vecto
     return msg;
 }
 
-} // anon
+static std::vector<std::vector<unsigned char>> split_sysex_all(const std::vector<unsigned char>& buf)
+{
+    std::vector<std::vector<unsigned char>> out;
+    size_t i = 0;
+    while (i < buf.size()) {
+        // find F0
+        while (i < buf.size() && buf[i] != 0xF0)
+            ++i;
+        if (i >= buf.size())
+            break;
+        size_t s = i++;
+        // find F7
+        while (i < buf.size() && buf[i] != 0xF7)
+            ++i;
+        if (i < buf.size()) {
+            out.emplace_back(buf.begin() + s, buf.begin() + i + 1);
+            ++i; // continue after F7
+        } else {
+            break; // unterminated at EOF -> stop
+        }
+    }
+    return out;
+}
 
-// PUBLIC: load all .syx recursively and fill both bank.data and per-voice patches
-std::vector<sysex_bank> load_sysex_banks_recursive(const std::filesystem::path& root_path)
+}
+
+std::vector<std::filesystem::path> load_sysex_banks_recursive(const std::filesystem::path& root_path)
 {
     std::vector<std::filesystem::path> files;
     std::error_code ec;
@@ -225,71 +257,65 @@ std::vector<sysex_bank> load_sysex_banks_recursive(const std::filesystem::path& 
     std::sort(files.begin(), files.end(),
         [](const auto& a, const auto& b) { return a.generic_string() < b.generic_string(); });
 
-    std::vector<sysex_bank> out;
-    out.reserve(files.size());
+    return files;
+}
 
-    for (const auto& f : files) {
-        auto raw = read_all(f);
-        auto msg = first_sysex(raw);
-        if (msg.empty() || !is_yamaha(msg))
+std::vector<sysex_patch> load_sysex_patches(const std::filesystem::path& bank)
+{
+    std::vector<sysex_patch> out;
+
+    // Read file and split into ALL sysex messages
+    auto raw  = read_all(bank);
+    auto msgs = split_sysex_all(raw);
+    if (msgs.empty()) return out;
+
+    int single_voice_index = 0;
+    int other_index = 0;
+
+    for (const auto& msg : msgs) {
+        if (!is_yamaha(msg)) {
+            // Unknown vendor: still expose as a patch with a generic name
+            sysex_patch p;
+            p.name = bank.filename().string() + " (Msg " + std::to_string(++other_index) + ")";
+            p.data = msg;
+            out.push_back(std::move(p));
             continue;
-
-        // nice display name = relative path stem (no .syx)
-        std::filesystem::path rel;
-        std::error_code ec2;
-        rel = std::filesystem::relative(f, root_path, ec2);
-        if (ec2 || rel.empty())
-            rel = f.filename();
-        rel.replace_extension();
-        std::string bankName = rel.generic_string();
-
-        sysex_bank bank;
-        bank.name = std::move(bankName);
+        }
 
         if (is_dx7_bank32(msg)) {
-            // Keep the full bank message
-            bank.data = msg;
-
-            // Explode into 32 single-voice SysEx patches
-            const size_t data_off = 6; // after header/count (F0 43 .. 09 MS LS)
+            // Explode 32-voice bank into 32 single-voice messages
+            const size_t data_off = 6;
             const unsigned char* data = msg.data() + data_off;
             for (int i = 0; i < 32; ++i) {
-                const unsigned char* chunk = data + i * 128;
-                auto params = dx7_chunk128_to_param155(chunk);
-                auto patchMsg = build_single_voice_sysex_from_params(params, /*channel*/ 0);
+                const unsigned char* chunk = data + i*128;
+                auto params   = dx7_chunk128_to_param155(chunk);
+                auto patchMsg = build_single_voice_sysex_from_params(params, /*channel*/0);
 
                 sysex_patch p;
                 p.name = name_from_chunk(chunk);
                 p.data = std::move(patchMsg);
-                bank.patches.push_back(std::move(p));
+                out.push_back(std::move(p));
             }
-        } else if (is_dx7_single_voice_msg(msg)) {
-            bank.data = msg; // <— make bank.data the same full F0..F7
-            // Name: try 10 ASCII chars near the end; else use stem
-            std::string nm = rel.stem().string();
-            for (size_t i = 0; i + 10 <= msg.size(); ++i) {
-                bool ok = true;
-                for (size_t k = 0; k < 10; ++k) {
-                    unsigned char c = msg[i + k];
-                    if (c < 0x20 || c > 0x7E) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) {
-                    nm.assign((const char*)&msg[i], 10);
-                    break;
-                }
-            }
-            bank.patches.push_back(sysex_patch { nm, msg }); // patch.data == bank.data (by value)
-        } else {
-            // Unknown Yamaha (DX7II/TX, etc.) — keep consistent:
-            bank.data = msg; // <— store full message as the bank data
-            bank.patches.push_back(sysex_patch { rel.filename().string(), msg });
+            continue;
         }
 
-        if (!bank.patches.empty() || !bank.data.empty())
-            out.push_back(std::move(bank));
+        if (is_dx7_single_voice_msg(msg)) {
+            sysex_patch p;
+            p.name = name_from_single_voice_msg(msg);
+            if (p.name == "Voice") {
+                // If name not present, label with filename + index to avoid duplicates
+                p.name = bank.stem().string() + " (Voice " + std::to_string(++single_voice_index) + ")";
+            }
+            p.data = msg; // already a complete single-voice F0..F7
+            out.push_back(std::move(p));
+            continue;
+        }
+
+        // Other Yamaha formats (DX7II/TX etc.) — expose raw message
+        sysex_patch p;
+        p.name = bank.filename().string() + " (Yamaha Msg " + std::to_string(++other_index) + ")";
+        p.data = msg;
+        out.push_back(std::move(p));
     }
 
     return out;
