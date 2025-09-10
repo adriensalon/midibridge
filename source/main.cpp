@@ -445,11 +445,6 @@ int main(int, char**)
     // SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
     // SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
 
-    static window_state _state;
-    open_virtual_input(_state.virtual_port_name, [](const std::vector<unsigned char>& data) {
-        send_to_hardware_output(data);
-    });
-
     // Main loop
     bool done = false;
     while (!done) {
@@ -471,7 +466,7 @@ int main(int, char**)
         ImGui::NewFrame();
 
         // ImGui::ShowDemoWindow();
-        draw_main_window(_state);
+        draw_main_window();
 
         ImGui::Render();
 

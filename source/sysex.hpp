@@ -4,15 +4,17 @@
 #include <string>
 #include <vector>
 
+/// @brief Represents a sysex patch
 struct sysex_patch {
     std::string name;
     std::vector<unsigned char> data; // single F0..F7 packet
 };
 
-[[nodiscard]] std::vector<unsigned char> read_all(const std::string& path);
+/// @brief Represents a sysex bank of patches
+struct sysex_bank {
+    std::string name;
+    std::vector<sysex_patch> patches;
+};
 
-[[nodiscard]] std::vector<std::vector<unsigned char>> split(const std::vector<unsigned char>& buf); // F0..F7 packets
-
-[[nodiscard]] std::string guess_dx7_name(const std::vector<unsigned char>& msg, int idx); // 10-char ASCII heuristic
-
-[[nodiscard]] std::vector<sysex_patch> load_sysex_file(const std::filesystem::path& sysex_path);
+/// @brief Loads recursively all sysex banks
+[[nodiscard]] std::vector<sysex_bank> load_sysex_banks_recursive(const std::filesystem::path& root_path);

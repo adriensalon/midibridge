@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+
+
 /// @brief Represents the state shared with the gui
 struct window_state {
     std::vector<std::string> hardware_port_names;
@@ -19,4 +21,4 @@ struct window_state {
 };
 
 /// @brief Draws the window gui
-void draw_main_window(window_state& state);
+void draw_main_window();

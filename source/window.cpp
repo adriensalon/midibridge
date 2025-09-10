@@ -1,69 +1,143 @@
 #include "window.hpp"
+#include "dialog.hpp"
 #include "router.hpp"
 
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
 
 #include <chrono>
 #include <thread>
 
+// clang-format off
+#define IMGUID_CONCAT(lhs, rhs) lhs # rhs
+#define IMGUID_CONCAT_WRAPPER(lhs, rhs) IMGUID_CONCAT(lhs, rhs)
+#define IMGUID_UNIQUE IMGUID_CONCAT_WRAPPER(__FILE__, __LINE__)
+#define IMGUID(NAME) NAME "###" IMGUID_UNIQUE
+#define IMGUIDU "###" IMGUID_UNIQUE
+// clang-format on
 
-void draw_main_window(window_state& state)
+namespace {
+
+static bool is_setup_modal_shown = false;
+static bool is_setup_finished = false;
+static const char* setup_modal_id = IMGUID("Setup");
+static std::size_t setup_selected_hardware_port = 0;
+static std::vector<std::string> setup_detected_hardware_ports;
+static std::string setup_virtual_port_name = "MIDI Bridge";
+static std::string setup_library_directory = "Path to the directory...";
+
+void draw_setup_text(const float modal_width)
 {
-    ImGui::Begin("DX7Bridge");
+    const float _wrap_width = modal_width - ImGui::GetStyle().WindowPadding.x * 2.0f;
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + _wrap_width);
+    ImGui::TextUnformatted(
+        "User projects will be stored as .dxcc in the collection directory. "
+        "This can be modified later from [Settings > Collection] or from the "
+        "settings.json next to the dawxchange executable.");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::Spacing();
+}
 
-    // HW out open
-    static char hwbuf[128] = {};
-    static bool init = true;
-    if (init) {
-        strncpy(hwbuf, state.hardware_port_name.c_str(), sizeof(hwbuf));
-        init = false;
+void draw_setup_hardware_port_control()
+{
+    if (setup_detected_hardware_ports.empty()) {
+        setup_detected_hardware_ports = get_hardware_ports();
     }
-    ImGui::InputText("HW Out match", hwbuf, sizeof(hwbuf));
+    ImGui::Text("Hardware port");
+    const float _full_width = ImGui::GetContentRegionAvail().x;
+    ImGui::SetNextItemWidth(_full_width);
+    const std::string _combo_preview = setup_detected_hardware_ports.empty() ? "No hardware port detected" : setup_detected_hardware_ports[setup_selected_hardware_port];
+    if (ImGui::BeginCombo(IMGUIDU, _combo_preview.c_str())) {
+        std::size_t _index = 0;
+        for (const std::string& _hardware_port : setup_detected_hardware_ports) {
+            if (ImGui::Selectable(setup_detected_hardware_ports[_index].c_str())) {
+                setup_selected_hardware_port = _index;
+            }
+            _index++;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Spacing();
+}
+
+void draw_setup_virtual_port_control()
+{
+    ImGui::Text("Virtual port");
+    const float _full_width = ImGui::GetContentRegionAvail().x;
+    ImGui::SetNextItemWidth(_full_width);
+    ImGui::InputText(IMGUIDU, &setup_virtual_port_name);
+    ImGui::Spacing();
+}
+
+void draw_setup_library_path_control()
+{
+    ImGui::Text("Library path");
+    const float _full_width = ImGui::GetContentRegionAvail().x;
+    const float _button_width = 95.0f;
+    const float _spacing_width = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(_full_width - _button_width - _spacing_width);
+    ImGui::InputText(IMGUIDU, &setup_library_directory);
     ImGui::SameLine();
-    if (ImGui::Button("Open")) {
-        state.hardware_port_name = hwbuf;
-        open_hardware_output(1);
+    if (ImGui::Button("Select...", ImVec2(_button_width, 0))) {
+        if (const std::optional<std::filesystem::path> _path = pick_directory_dialog(std::filesystem::current_path()))
+            setup_library_directory = _path->string();
     }
-    ImGui::SameLine();
-    ImGui::TextUnformatted(is_hardware_output_open() ? "Opened" : "Closed");
+    ImGui::Spacing();
+}
 
-    // Virtual port status
-#ifdef _WIN32
-    ImGui::Text("Virtual In: %s", is_virtual_input_open() ? "Running" : "Stopped");
-#endif
-
-    // ImGui::InputInt("Packet delay (ms)", &state.send_delay);
-
-    // Load .syx (plug your file dialog; here a stub button)
-    if (ImGui::Button("Load .syx")) {
-        // TODO: replace with actual picker result:
-        // auto loaded = sysex::loadSyxFile(path);
-        // state.sysex_patches = std::move(loaded); state.selected = -1;
+void draw_setup_start_control()
+{
+    if (!std::filesystem::is_directory(setup_library_directory)) {
+        ImGui::BeginDisabled();
     }
+    if (ImGui::Button(IMGUID("Start"), ImVec2(-FLT_MIN, 0.f))) {
+        open_hardware_output(setup_selected_hardware_port);
+        open_virtual_input(setup_virtual_port_name, [](const std::vector<unsigned char>& data) {
+            send_to_hardware_output(data);
+        });
+        is_setup_finished = true;
+        ImGui::CloseCurrentPopup();
+    }
+    if (!std::filesystem::is_directory(setup_library_directory)) {
+        ImGui::EndDisabled();
+    }
+}
 
-    // ImGui::Separator();
-    // if (ImGui::BeginListBox("Patches", ImVec2(-FLT_MIN, 300))) {
-    //     for (int i = 0; i < (int)state.sysex_patches.size(); ++i) {
-    //         bool sel = (state.selected == i);
-    //         if (ImGui::Selectable(state.sysex_patches[i].name.c_str(), sel))
-    //             state.selected = i;
-    //     }
-    //     ImGui::EndListBox();
-    // }
+void draw_setup_modal()
+{
+    if (!is_setup_modal_shown) {
+        ImGui::OpenPopup(setup_modal_id);
+        is_setup_modal_shown = true;
+    }
+    const float _modal_width = 400.f;
+    const ImVec2 _viewport_center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(_viewport_center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(_modal_width, 0.f), ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(_modal_width, 0.f), ImVec2(_modal_width, FLT_MAX));
+    if (ImGui::BeginPopupModal(setup_modal_id, nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        draw_setup_text(_modal_width);
+        draw_setup_hardware_port_control();
+        draw_setup_virtual_port_control();
+        draw_setup_library_path_control();
+        draw_setup_start_control();
+        ImGui::EndPopup();
+    }
+}
 
-    // ImGui::BeginDisabled(state.selected < 0 || state.is_sending || !is_hardware_output_open());
-    // if (ImGui::Button("Send to DX7")) {
-    //     state.is_sending = true;
-    //     auto msg = state.sysex_patches[state.selected].data;
-    //     int delay = state.send_delay;
-    //     std::thread([msg, delay, &state] {
-    //         send(msg);
-    //         if (delay > 0)
-    //             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-    //         state.is_sending = false;
-    //     }).detach();
-    // }
-    // ImGui::EndDisabled();
+void draw_library_window()
+{
+    if (is_setup_finished) {
+        if (ImGui::Begin(IMGUID("Library"))) {
+            ImGui::End();
+        }
+    }
+}
 
-    ImGui::End();
+}
+
+void draw_main_window()
+{
+    draw_setup_modal();
+    draw_library_window();
 }
