@@ -3,11 +3,13 @@
 #include "router.hpp"
 #include "sysex.hpp"
 
+#include <cereal/archives/json.hpp>
+#include <cereal/types/string.hpp>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <chrono>
-#include <iostream>
+#include <fstream>
 #include <thread>
 
 // clang-format off
@@ -20,13 +22,14 @@
 
 namespace {
 
+static std::size_t setup_selected_hardware_port;
+static std::string setup_virtual_port_name;
+static std::string setup_library_directory;
+
 static bool is_setup_finished = false;
 static bool is_setup_modal_shown = false;
 static const char* setup_modal_id = IMGUID("Setup");
-static std::size_t setup_selected_hardware_port = 0;
 static std::vector<std::string> setup_detected_hardware_ports;
-static std::string setup_virtual_port_name = "DX7 MIDI Bridge";
-static std::string setup_library_directory = "Path to the directory...";
 static std::vector<std::filesystem::path> library_banks;
 static std::vector<sysex_patch> library_patches;
 static int library_selected_bank_index = -1;
@@ -104,6 +107,12 @@ void draw_setup_start_control()
         });
         library_banks = load_sysex_banks_recursive(setup_library_directory);
         is_setup_finished = true;
+        const std::filesystem::path _settings_path = std::filesystem::current_path() / "settings.json";
+        std::ofstream _stream(_settings_path);
+        cereal::JSONOutputArchive _archive(_stream);
+        _archive(cereal::make_nvp("hardware_port_index", setup_selected_hardware_port));
+        _archive(cereal::make_nvp("virtual_port_name", setup_virtual_port_name));
+        _archive(cereal::make_nvp("library_directory", setup_library_directory));
         ImGui::CloseCurrentPopup();
     }
     if (!std::filesystem::is_directory(setup_library_directory)) {
@@ -114,6 +123,20 @@ void draw_setup_start_control()
 void draw_setup_modal()
 {
     if (!is_setup_modal_shown) {
+        const std::filesystem::path _settings_path = std::filesystem::current_path() / "settings.json";
+        if (!std::filesystem::exists(_settings_path)) {
+            std::ofstream _stream(_settings_path);
+            cereal::JSONOutputArchive _archive(_stream);
+            _archive(cereal::make_nvp("hardware_port_index", 0));
+            _archive(cereal::make_nvp("virtual_port_name", std::string("DX7 MIDI Bridge")));
+            _archive(cereal::make_nvp("library_directory", std::string("Path to the directory...")));
+        }
+        std::ifstream _stream(_settings_path);
+        cereal::JSONInputArchive _archive(_stream);
+        _archive(cereal::make_nvp("hardware_port_index", setup_selected_hardware_port));
+        _archive(cereal::make_nvp("virtual_port_name", setup_virtual_port_name));
+        _archive(cereal::make_nvp("library_directory", setup_library_directory));
+
         ImGui::OpenPopup(setup_modal_id);
         is_setup_modal_shown = true;
     }
