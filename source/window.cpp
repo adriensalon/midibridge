@@ -27,7 +27,6 @@ static std::size_t setup_selected_hardware_port = 0;
 static std::vector<std::string> setup_detected_hardware_ports;
 static std::string setup_virtual_port_name = "MIDI Bridge";
 static std::string setup_library_directory = "Path to the directory...";
-
 static std::vector<std::filesystem::path> library_banks;
 static std::vector<sysex_patch> library_patches;
 static int library_selected_bank_index = -1;
@@ -39,9 +38,8 @@ void draw_setup_text(const float modal_width)
     const float _wrap_width = modal_width - ImGui::GetStyle().WindowPadding.x * 2.0f;
     ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + _wrap_width);
     ImGui::TextUnformatted(
-        "User projects will be stored as .dxcc in the collection directory. "
-        "This can be modified later from [Settings > Collection] or from the "
-        "settings.json next to the dawxchange executable.");
+        "Define hardware and virtual ports to use for bridge. Every .syx file will be loaded "
+        "recursively from the selected library path.");
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     ImGui::Spacing();
@@ -137,7 +135,15 @@ void draw_setup_modal()
 void draw_library_window()
 {
     if (is_setup_finished) {
-        if (ImGui::Begin(IMGUID("Library"))) {
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
+        const ImGuiWindowFlags _window_flags = ImGuiWindowFlags_NoDecoration
+            | ImGuiWindowFlags_NoDocking
+            | ImGuiWindowFlags_NoResize
+            | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+        if (ImGui::Begin(IMGUID("Library"), 0, _window_flags)) {
 
             const ImGuiTableFlags _table_flags = ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg;
             const float _table_height = ImGui::GetContentRegionAvail().y;
@@ -228,5 +234,5 @@ void draw_main_window()
 {
     draw_setup_modal();
     draw_library_window();
-    draw_edit_window();
+    // draw_edit_window();
 }

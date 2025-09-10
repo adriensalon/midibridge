@@ -20,18 +20,16 @@ using PFN_GetData = BOOL(WINAPI*)(LPVM_MIDI_PORT, PBYTE, PDWORD);
 using PFN_SendData = BOOL(WINAPI*)(LPVM_MIDI_PORT, PBYTE, DWORD);
 using PFN_Close = VOID(WINAPI*)(LPVM_MIDI_PORT);
 
-static HMODULE vtmidi_module = nullptr;
-static PFN_CreateEx2 vtmidi_create_ex2 = nullptr;
-static PFN_GetData vtmidi_get_data = nullptr;
-static PFN_SendData vtmidi_send_data = nullptr;
-static PFN_Close vtmidi_close = nullptr;
-
-static std::mutex global_hardware_mutex;
-static RtMidiOut global_hardware_midiout;
-
-static LPVM_MIDI_PORT global_virtual_midiout = nullptr;
-static std::atomic<bool> global_is_virtual_running = false;
-static std::thread global_virtual_thread;
+static std::mutex hardware_mutex;
+static RtMidiOut hardware_midiout;
+static HMODULE virtual_module = nullptr;
+static PFN_CreateEx2 virtual_create_ex2 = nullptr;
+static PFN_GetData virtual_get_data = nullptr;
+static PFN_SendData virtual_send_data = nullptr;
+static PFN_Close virtual_close = nullptr;
+static LPVM_MIDI_PORT virtual_midiout = nullptr;
+static std::atomic<bool> is_virtual_running = false;
+static std::thread virtual_thread;
 
 [[nodiscard]] static std::string to_string(const std::wstring& utf16)
 {
@@ -70,54 +68,6 @@ static std::thread global_virtual_thread;
     }
 
     return to_string(_message);
-}
-
-static void unload_vtmidi_library()
-{
-    vtmidi_create_ex2 = nullptr;
-    vtmidi_get_data = nullptr;
-    vtmidi_send_data = nullptr;
-    vtmidi_close = nullptr;
-
-    if (vtmidi_module) {
-        FreeLibrary(vtmidi_module);
-        vtmidi_module = nullptr;
-    }
-}
-
-static void load_vtmidi_library()
-{
-#if defined(_WIN64)
-    const wchar_t* _candidate_paths[] = { L".\\teVirtualMIDI64.dll", L"teVirtualMIDI64.dll" };
-#else
-    const wchar_t* _candidate_paths[] = { L".\\teVirtualMIDI32.dll", L"teVirtualMIDI32.dll" };
-#endif
-
-    if (vtmidi_module) {
-        return;
-    }
-
-    for (const wchar_t* _path : _candidate_paths) {
-        vtmidi_module = LoadLibraryW(_path);
-        if (vtmidi_module) {
-            break;
-        }
-    }
-
-    if (!vtmidi_module) {
-        DWORD _error = GetLastError();
-        throw std::runtime_error(std::string("LoadLibrary failed: ") + get_last_error_message(_error).c_str());
-    }
-
-    vtmidi_create_ex2 = reinterpret_cast<PFN_CreateEx2>(GetProcAddress(vtmidi_module, "virtualMIDICreatePortEx2"));
-    vtmidi_get_data = reinterpret_cast<PFN_GetData>(GetProcAddress(vtmidi_module, "virtualMIDIGetData"));
-    vtmidi_send_data = reinterpret_cast<PFN_SendData>(GetProcAddress(vtmidi_module, "virtualMIDISendData"));
-    vtmidi_close = reinterpret_cast<PFN_Close>(GetProcAddress(vtmidi_module, "virtualMIDIClosePort"));
-
-    if (!vtmidi_create_ex2 || !vtmidi_get_data || !vtmidi_close) {
-        unload_vtmidi_library();
-        throw std::runtime_error("GetProcAddress failed (missing exports)");
-    }
 }
 
 [[nodiscard]] static bool is_status(unsigned char byte)
@@ -162,7 +112,7 @@ static void load_vtmidi_library()
 static void send_short(const unsigned char* data, const std::size_t length)
 {
     try {
-        global_hardware_midiout.sendMessage(data, (int)length);
+        hardware_midiout.sendMessage(data, (int)length);
     } catch (...) {
     }
 }
@@ -171,7 +121,7 @@ static void send_vector(const std::vector<unsigned char>& data)
 {
     if (!data.empty()) {
         try {
-            global_hardware_midiout.sendMessage(&data);
+            hardware_midiout.sendMessage(&data);
         } catch (...) {
         }
     }
@@ -277,52 +227,100 @@ static void split_and_send(const std::vector<unsigned char>& data)
     }
 }
 
+static void unload_vtmidi_library()
+{
+    virtual_create_ex2 = nullptr;
+    virtual_get_data = nullptr;
+    virtual_send_data = nullptr;
+    virtual_close = nullptr;
+
+    if (virtual_module) {
+        FreeLibrary(virtual_module);
+        virtual_module = nullptr;
+    }
+}
+
+static void load_vtmidi_library()
+{
+#if defined(_WIN64)
+    const wchar_t* _candidate_paths[] = { L".\\teVirtualMIDI64.dll", L"teVirtualMIDI64.dll" };
+#else
+    const wchar_t* _candidate_paths[] = { L".\\teVirtualMIDI32.dll", L"teVirtualMIDI32.dll" };
+#endif
+
+    if (virtual_module) {
+        return;
+    }
+
+    for (const wchar_t* _path : _candidate_paths) {
+        virtual_module = LoadLibraryW(_path);
+        if (virtual_module) {
+            break;
+        }
+    }
+
+    if (!virtual_module) {
+        DWORD _error = GetLastError();
+        throw std::runtime_error(std::string("LoadLibrary failed: ") + get_last_error_message(_error).c_str());
+    }
+
+    virtual_create_ex2 = reinterpret_cast<PFN_CreateEx2>(GetProcAddress(virtual_module, "virtualMIDICreatePortEx2"));
+    virtual_get_data = reinterpret_cast<PFN_GetData>(GetProcAddress(virtual_module, "virtualMIDIGetData"));
+    virtual_send_data = reinterpret_cast<PFN_SendData>(GetProcAddress(virtual_module, "virtualMIDISendData"));
+    virtual_close = reinterpret_cast<PFN_Close>(GetProcAddress(virtual_module, "virtualMIDIClosePort"));
+
+    if (!virtual_create_ex2 || !virtual_get_data || !virtual_close) {
+        unload_vtmidi_library();
+        throw std::runtime_error("GetProcAddress failed (missing exports)");
+    }
+}
+
 }
 
 std::vector<std::string> get_hardware_ports()
 {
     std::vector<std::string> _hardware_ports;
-    _hardware_ports.resize(global_hardware_midiout.getPortCount());
+    _hardware_ports.resize(hardware_midiout.getPortCount());
     for (unsigned int _index = 0; _index < _hardware_ports.size(); ++_index) {
-        _hardware_ports[_index] = global_hardware_midiout.getPortName(_index);
+        _hardware_ports[_index] = hardware_midiout.getPortName(_index);
     }
     return _hardware_ports;
 }
 
 void open_hardware_output(const std::size_t& index)
 {
-    std::lock_guard<std::mutex> _lock_guard(global_hardware_mutex);
-    if (global_hardware_midiout.isPortOpen()) {
-        global_hardware_midiout.closePort();
+    std::lock_guard<std::mutex> _lock_guard(hardware_mutex);
+    if (hardware_midiout.isPortOpen()) {
+        hardware_midiout.closePort();
     }
-    global_hardware_midiout.openPort(index);
+    hardware_midiout.openPort(index);
 }
 
 void close_hardware_output()
 {
-    std::lock_guard<std::mutex> _lock_guard(global_hardware_mutex);
-    if (global_hardware_midiout.isPortOpen()) {
-        global_hardware_midiout.closePort();
+    std::lock_guard<std::mutex> _lock_guard(hardware_mutex);
+    if (hardware_midiout.isPortOpen()) {
+        hardware_midiout.closePort();
     }
 }
 
 bool is_hardware_output_open()
 {
-    std::lock_guard<std::mutex> _lock_guard(global_hardware_mutex);
-    return global_hardware_midiout.isPortOpen();
+    std::lock_guard<std::mutex> _lock_guard(hardware_mutex);
+    return hardware_midiout.isPortOpen();
 }
 
-void send_to_hardware_output(const std::vector<unsigned char>& msg)
+void send_to_hardware_output(const std::vector<unsigned char>& message)
 {
-    std::lock_guard<std::mutex> _lock_guard(global_hardware_mutex);
-    if (global_hardware_midiout.isPortOpen()) {
-        split_and_send(msg);
+    std::lock_guard<std::mutex> _lock_guard(hardware_mutex);
+    if (hardware_midiout.isPortOpen()) {
+        split_and_send(message);
     }
 }
 
 void open_virtual_input(const std::string& port, const std::function<void(const std::vector<unsigned char>&)>& callback)
 {
-    if (global_is_virtual_running.load()) {
+    if (is_virtual_running.load()) {
         return;
     }
 
@@ -330,18 +328,18 @@ void open_virtual_input(const std::string& port, const std::function<void(const 
 
     const DWORD _flags = 0;
     const DWORD _max_sysex_size = 65535;
-    global_virtual_midiout = vtmidi_create_ex2(to_wstring(port).c_str(), nullptr, nullptr, _max_sysex_size, _flags);
-    if (!global_virtual_midiout) {
+    virtual_midiout = virtual_create_ex2(to_wstring(port).c_str(), nullptr, nullptr, _max_sysex_size, _flags);
+    if (!virtual_midiout) {
         throw std::runtime_error("CreatePortEx2 failed");
     }
 
-    global_is_virtual_running = true;
-    global_virtual_thread = std::thread([callback] {
+    is_virtual_running = true;
+    virtual_thread = std::thread([callback] {
         std::vector<unsigned char> _buffer(65536);
-        while (global_is_virtual_running.load()) {
+        while (is_virtual_running.load()) {
 
             DWORD _size;
-            if (vtmidi_get_data(global_virtual_midiout, _buffer.data(), &_size)) {
+            if (virtual_get_data(virtual_midiout, _buffer.data(), &_size)) {
                 _buffer.resize(_size);
                 callback(_buffer);
             } else {
@@ -353,24 +351,21 @@ void open_virtual_input(const std::string& port, const std::function<void(const 
 
 void close_virtual_input()
 {
-    if (!global_is_virtual_running.load()) {
+    if (!is_virtual_running.exchange(false)) {
         return;
     }
-
-    global_is_virtual_running = false;
-    if (global_virtual_thread.joinable()) {
-        global_virtual_thread.join();
+    LPVM_MIDI_PORT _port = virtual_midiout;
+    virtual_midiout = nullptr;
+    if (_port) {
+        virtual_close(_port);
     }
-
-    if (global_virtual_midiout) {
-        vtmidi_close(global_virtual_midiout);
-        global_virtual_midiout = nullptr;
+    if (virtual_thread.joinable()) {
+        virtual_thread.join();
     }
-
     unload_vtmidi_library();
 }
 
 bool is_virtual_input_open()
 {
-    return global_is_virtual_running.load();
+    return is_virtual_running.load();
 }
