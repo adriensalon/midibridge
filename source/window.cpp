@@ -157,17 +157,18 @@ void draw_setup_modal()
 
 void draw_library_window()
 {
-    if (is_setup_finished) {
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
-        const ImGuiWindowFlags _window_flags = ImGuiWindowFlags_NoDecoration
-            | ImGuiWindowFlags_NoDocking
-            | ImGuiWindowFlags_NoResize
-            | ImGuiWindowFlags_NoMove
-            | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-        if (ImGui::Begin(IMGUID("Library"), 0, _window_flags)) {
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
+    const ImGuiWindowFlags _window_flags = ImGuiWindowFlags_NoDecoration
+        | ImGuiWindowFlags_NoDocking
+        | ImGuiWindowFlags_NoResize
+        | ImGuiWindowFlags_NoMove
+        | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
+    if (ImGui::Begin(IMGUID("Library"), 0, _window_flags)) {
+        
+        if (is_setup_finished) {
             const ImGuiTableFlags _table_flags = ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg;
             const float _table_height = ImGui::GetContentRegionAvail().y;
             if (ImGui::BeginTable(IMGUIDU, 1, _table_flags, ImVec2(-FLT_MIN, _table_height))) {
@@ -238,8 +239,8 @@ void draw_library_window()
                 }
                 ImGui::EndTable();
             }
-            ImGui::End();
         }
+        ImGui::End();
     }
 }
 
