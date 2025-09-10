@@ -7,12 +7,13 @@
 /// @brief Represents a sysex patch
 struct sysex_patch {
     std::string name;
-    std::vector<unsigned char> data; // single F0..F7 packet
+    std::vector<unsigned char> data;
 };
 
 /// @brief Represents a sysex bank of patches
 struct sysex_bank {
     std::string name;
+    std::vector<unsigned char> data;
     std::vector<sysex_patch> patches;
 };
 

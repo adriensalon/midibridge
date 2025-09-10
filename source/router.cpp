@@ -159,95 +159,112 @@ bool is_hardware_output_open()
     return global_hardware_midiout.isPortOpen();
 }
 
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
+static unsigned char g_running = 0;                 // channel-voice running status
+static std::vector<unsigned char> g_syx_accum;      // accumulate F0...F7 across chunks
 
-static unsigned char g_running = 0; // persists across callbacks
-static std::vector<unsigned char> g_syx_accum; // not used in safe mode
+static inline bool isStatus(unsigned char b)   { return (b & 0x80) != 0; }
+static inline bool isRealtime(unsigned char b) { return b >= 0xF8; }
+static inline bool isSystemCommon(unsigned char b){ return b >= 0xF0 && b <= 0xF7; }
 
-static bool isStatus(unsigned char b) { return (b & 0x80) != 0; }
-static bool isRealtime(unsigned char b) { return b >= 0xF8; }
-static int chanDataCount(unsigned char s)
-{
-    unsigned char hi = s & 0xF0;
-    if (hi == 0xC0 || hi == 0xD0)
-        return 1;
-    if (hi >= 0x80 && hi <= 0xE0)
-        return 2;
-    return 0;
-}
-static bool allowNoteCh1(unsigned char s)
-{
-    unsigned char hi = s & 0xF0;
-    return ((hi == 0x80) || (hi == 0x90)) && ((s & 0x0F) == 0x00);
+static inline int dataCountForStatus(unsigned char s){
+    if (s < 0xF0) { // channel voice
+        unsigned char hi = s & 0xF0;
+        return (hi == 0xC0 || hi == 0xD0) ? 1 : 2; // PC/Channel Pressure=1, others=2
+    }
+    switch (s) {    // system common
+        case 0xF0: return -1; // SysEx (variable until F7)
+        case 0xF1: return 1;  // MTC Quarter Frame
+        case 0xF2: return 2;  // Song Position
+        case 0xF3: return 1;  // Song Select
+        case 0xF6: return 0;  // Tune Request
+        case 0xF7: return 0;  // EOX (handled mainly inside SysEx)
+        default:    return 0;  // real-time (F8..FF) or undefined F4/F5 => 0 data
+    }
 }
 
-static void forward_safe_note_only(const unsigned char* s, size_t n)
+// Send ALL MIDI: short messages split properly, SysEx assembled, real-time passthrough
+static void forward_unfiltered_split_and_send(const unsigned char* s, size_t n)
 {
-    using namespace std::chrono;
     size_t i = 0;
+
+    auto sendShort = [&](const unsigned char* p, size_t len){
+        try { global_hardware_midiout.sendMessage(p, (int)len); } catch (...) {}
+    };
+    auto sendVec = [&](const std::vector<unsigned char>& v){
+        if (!v.empty()) { try { global_hardware_midiout.sendMessage(&v); } catch (...) {} }
+    };
+    auto sendByte = [&](unsigned char b){ sendShort(&b, 1); };
+
     while (i < n) {
         unsigned char b = s[i];
 
-        if (isRealtime(b)) {
-            ++i;
-            continue;
-        } // drop all realtime
-        if (b >= 0xF0) {
-            g_running = 0;
-            ++i;
-            continue;
-        } // drop all system (incl. sysex) for now
+        // Real-time messages can appear anywhere; each is 1 byte
+        if (isRealtime(b)) { sendByte(b); ++i; continue; }
 
-        if (isStatus(b)) {
-            int need = chanDataCount(b);
-            if (need && (i + 1 + need) <= n && allowNoteCh1(b)) {
-                unsigned char msg[3] = { b, s[i + 1], need == 2 ? s[i + 2] : (unsigned char)0 };
-                try {
-                    global_hardware_midiout.sendMessage(msg, 1 + need);
-                } catch (RtMidiError&) { /* swallow */
-                }
-                // ultra conservative throttle so DX7 can't choke while we debug
-                std::this_thread::sleep_for(milliseconds(1));
+        // Start or continue SysEx
+        if (b == 0xF0 || !g_syx_accum.empty()) {
+            if (b == 0xF0 && g_syx_accum.empty()) { g_syx_accum.clear(); g_syx_accum.push_back(0xF0); ++i; }
+            for (; i < n; ++i) {
+                unsigned char c = s[i];
+                if (isRealtime(c)) { sendByte(c); continue; } // real-time allowed inside SysEx
+                g_syx_accum.push_back(c);
+                if (c == 0xF7) { sendVec(g_syx_accum); g_syx_accum.clear(); ++i; break; }
             }
-            g_running = (b < 0xF0) ? b : 0;
-            i += 1 + std::max(0, need);
+            g_running = 0; // SysEx cancels running status
             continue;
         }
 
-        if (g_running) {
-            int need = chanDataCount(g_running);
-            if (need == 1) {
-                if (allowNoteCh1(g_running)) {
-                    unsigned char msg[2] = { g_running, s[i] };
-                    try {
-                        global_hardware_midiout.sendMessage(msg, 2);
-                    } catch (...) {
-                    }
-                    std::this_thread::sleep_for(milliseconds(1));
+        // Status byte starts a new message
+        if (isStatus(b)) {
+            int need = dataCountForStatus(b);
+
+            // System Common (non-SysEx)
+            if (isSystemCommon(b) && b != 0xF0) {
+                size_t have = n - (i + 1);
+                size_t take = (need > 0 && have >= (size_t)need) ? (size_t)need : 0;
+                unsigned char msg[3] = { b, 0, 0 };
+                for (size_t k = 0; k < take; ++k) msg[1 + k] = s[i + 1 + k];
+                sendShort(msg, 1 + take);
+                i += 1 + take;
+                g_running = 0; // System Common cancels running status
+                continue;
+            }
+
+            // Channel-voice short message
+            if (need >= 0) {
+                if (i + 1 + need <= n) {
+                    unsigned char msg[3] = { b, 0, 0 };
+                    for (int k = 0; k < need; ++k) msg[1 + k] = s[i + 1 + k];
+                    sendShort(msg, 1 + (size_t)need);
+                    g_running = b; // set running
+                    i += 1 + (size_t)need;
+                } else {
+                    // incomplete at end of chunk; drop remainder to avoid malformed send
+                    i = n;
                 }
+                continue;
+            }
+
+            // need == -1 would be SysEx (handled above)
+            ++i;
+            continue;
+        }
+
+        // Data byte with running status (channel voice only)
+        if (g_running) {
+            int need = dataCountForStatus(g_running);
+            if (need == 1) {
+                unsigned char msg[2] = { g_running, s[i] };
+                sendShort(msg, 2);
                 ++i;
             } else if (need == 2) {
                 if (i + 1 < n) {
-                    if (allowNoteCh1(g_running)) {
-                        unsigned char msg[3] = { g_running, s[i], s[i + 1] };
-                        try {
-                            global_hardware_midiout.sendMessage(msg, 3);
-                        } catch (...) {
-                        }
-                        std::this_thread::sleep_for(milliseconds(1));
-                    }
+                    unsigned char msg[3] = { g_running, s[i], s[i + 1] };
+                    sendShort(msg, 3);
                     i += 2;
                 } else {
-                    ++i; // incomplete pair at end
+                    // incomplete pair at end; drop the last data byte
+                    ++i;
                 }
             } else {
                 ++i;
@@ -255,7 +272,8 @@ static void forward_safe_note_only(const unsigned char* s, size_t n)
             continue;
         }
 
-        ++i; // stray data byte
+        // Stray data byte without a running status: skip to resync
+        ++i;
     }
 }
 
@@ -263,9 +281,10 @@ void send_to_hardware_output(const std::vector<unsigned char>& msg)
 {
     std::lock_guard<std::mutex> _lock_guard(global_hardware_mutex);
     if (global_hardware_midiout.isPortOpen()) {
-        forward_safe_note_only(msg.data(), msg.size());
+        forward_unfiltered_split_and_send(msg.data(), msg.size());
     }
 }
+
 
 void open_virtual_input(const std::string& port, const std::function<void(const std::vector<unsigned char>&)>& callback)
 {

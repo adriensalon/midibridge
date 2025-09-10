@@ -1,12 +1,14 @@
 #include "window.hpp"
 #include "dialog.hpp"
 #include "router.hpp"
+#include "sysex.hpp"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <chrono>
 #include <thread>
+#include <iostream>
 
 // clang-format off
 #define IMGUID_CONCAT(lhs, rhs) lhs # rhs
@@ -18,8 +20,8 @@
 
 namespace {
 
-static bool is_setup_modal_shown = false;
 static bool is_setup_finished = false;
+static bool is_setup_modal_shown = false;
 static const char* setup_modal_id = IMGUID("Setup");
 static std::size_t setup_selected_hardware_port = 0;
 static std::vector<std::string> setup_detected_hardware_ports;
@@ -129,15 +131,97 @@ void draw_library_window()
 {
     if (is_setup_finished) {
         if (ImGui::Begin(IMGUID("Library"))) {
+
+            static int selectedBank, selectedPatch = -1;
+            static std::vector<sysex_bank> _banks = load_sysex_banks_recursive(setup_library_directory);
+
+            ImGuiTableFlags tblFlags = ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV;
+
+            const float tableH = ImGui::GetContentRegionAvail().y; // fill remaining space
+            if (ImGui::BeginTable("SysexBanksTable", 2, tblFlags, ImVec2(-FLT_MIN, tableH))) {
+                ImGui::TableSetupColumn("Bank / Patches", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("# / Size", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+                ImGui::TableHeadersRow();
+
+                for (int i = 0; i < (int)_banks.size(); ++i) {
+                    const sysex_bank& bank = _banks[i];
+
+                    // --- bank row ---
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+
+                    // Use a TreeNode in column 0 for the expand arrow
+                    ImGuiTreeNodeFlags tflags = ImGuiTreeNodeFlags_SpanFullWidth | ImGuiTreeNodeFlags_FramePadding;
+                    if (selectedBank == i && selectedPatch == -1)
+                        tflags |= ImGuiTreeNodeFlags_Selected;
+
+                    // Use a stable ID separate from the label (pointer-as-ID pattern)
+                    bool open = ImGui::TreeNodeEx((void*)(intptr_t)(i + 1), tflags, "%s", bank.name.c_str());
+
+                    // Column 1: patch count
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%d", (int)bank.patches.size());
+
+                    // Row click selection behavior for the bank itself
+                    // (clicking the label toggles the node, clicking empty row selects)
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen()) {
+                        selectedBank = i;
+                        selectedPatch = -1;
+                        
+                    }
+
+                    // --- patch rows when expanded ---
+                    if (open) {
+                        for (int j = 0; j < (int)bank.patches.size(); ++j) {
+                            const auto& patch = bank.patches[j];
+
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+
+                            // Leaf-style row (aligned with tree indent), selectable
+                            ImGuiTreeNodeFlags leaf = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanFullWidth;
+                            if (selectedBank == i && selectedPatch == j)
+                                leaf |= ImGuiTreeNodeFlags_Selected;
+
+                            // unique ID for the leaf (combine bank+patch indices)
+                            const intptr_t leafId = ((intptr_t)(i + 1) << 16) | (intptr_t)j;
+                            ImGui::TreeNodeEx((void*)leafId, leaf, "%s", patch.name.c_str());
+                            if (ImGui::IsItemClicked()) {
+                                selectedBank = i;
+                                selectedPatch = j;
+                                send_to_hardware_output(_banks[selectedBank].patches[selectedPatch].data);
+                            }
+
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::Text("%zu B", patch.data.size());
+                        }
+
+                        ImGui::TreePop(); // close bank node
+                    }
+                }
+
+                ImGui::EndTable();
+            }
+
+
             ImGui::End();
         }
     }
 }
 
+void draw_edit_window()
+{
+    if (is_setup_finished) {
+        if (ImGui::Begin(IMGUID("Edit"))) {
+            ImGui::End();
+        }
+    }
+}
 }
 
 void draw_main_window()
 {
     draw_setup_modal();
     draw_library_window();
+    draw_edit_window();
 }
