@@ -4,87 +4,85 @@
 
 namespace {
 
-std::vector<unsigned char> read_all(const std::filesystem::path& p)
+static std::vector<unsigned char> read_all(const std::filesystem::path& p)
 {
-    std::ifstream f(p, std::ios::binary);
-    if (!f)
+    std::ifstream _fstream(p, std::ios::binary);
+    if (!_fstream) {
         return {};
-    f.seekg(0, std::ios::end);
-    auto n = f.tellg();
-    f.seekg(0, std::ios::beg);
-    std::vector<unsigned char> buf((size_t)std::max<std::streamoff>(0, n));
-    if (!buf.empty())
-        f.read((char*)buf.data(), buf.size());
-    return buf;
+    }
+    _fstream.seekg(0, std::ios::end);
+    std::streampos _position = _fstream.tellg();
+    _fstream.seekg(0, std::ios::beg);
+    std::vector<unsigned char> _buffer((size_t)std::max<std::streamoff>(0, _position));
+    if (!_buffer.empty()) {
+        _fstream.read((char*)_buffer.data(), _buffer.size());
+    }
+    return _buffer;
 }
 
-std::size_t yamaha_count(const std::vector<unsigned char>& msg)
+static std::size_t yamaha_count(const std::vector<unsigned char>& msg)
 {
     if (msg.size() < 7)
         return 0;
     return (size_t(msg[4]) << 7) | size_t(msg[5]); // MS7 | LS7
 }
 
-bool is_yamaha(const std::vector<unsigned char>& msg) { return msg.size() >= 2 && msg[0] == 0xF0 && msg[1] == 0x43; }
+static bool is_yamaha(const std::vector<unsigned char>& msg) { return msg.size() >= 2 && msg[0] == 0xF0 && msg[1] == 0x43; }
 
-bool is_dx7_bank32(const std::vector<unsigned char>& msg)
+static bool is_dx7_bank32(const std::vector<unsigned char>& msg)
 {
     return is_yamaha(msg) && msg.size() >= 7 && msg[3] == 0x09 && yamaha_count(msg) == 4096;
 }
 
-bool is_dx7_single_voice_msg(const std::vector<unsigned char>& msg)
+static bool is_dx7_single_voice_msg(const std::vector<unsigned char>& msg)
 {
     return is_yamaha(msg) && msg.size() >= 7 && msg[3] == 0x00 && yamaha_count(msg) == 155;
 }
 
-std::string name_from_chunk(const unsigned char* chunk128)
+static std::string clean_ascii_10(const char* p10)
 {
-    std::string s((const char*)chunk128 + 118, 10);
-    for (char& c : s)
-        if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E)
+    std::string s(p10, 10);
+    for (char& c : s) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u > 0x7E)
             c = ' ';
-    while (!s.empty() && s.back() == ' ')
-        s.pop_back();
-    if (s.empty())
-        s = "Voice";
+    }
+    // rtrim spaces
+    size_t pos = s.find_last_not_of(' ');
+    if (pos == std::string::npos)
+        return "Voice";
+    s.resize(pos + 1);
     return s;
+}
+
+static std::string name_from_chunk(const unsigned char* chunk128)
+{
+    return clean_ascii_10(reinterpret_cast<const char*>(chunk128) + 118);
 }
 
 static std::string name_from_single_voice_msg(const std::vector<unsigned char>& msg)
 {
-    // F0 43 0n 00 01 1B [155 params] chk F7
+    // DX7 single-voice: F0 43 0n 00 01 1B [155 params] chk F7
+    // name is last 10 bytes of the 155-byte param block (offset 6+145)
     if (msg.size() >= 6 + 155 + 1 + 1) {
-        const unsigned char* params = msg.data() + 6;
-        std::string s((const char*)params + (155 - 10), 10); // bytes 145..154
-        for (char& c : s) if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E) c = ' ';
-        while (!s.empty() && s.back() == ' ') s.pop_back();
-        if (!s.empty()) return s;
-    }
-    // Fallback: scan anywhere
-    for (size_t i = 0; i + 10 <= msg.size(); ++i) {
-        bool ok = true;
-        for (size_t k = 0; k < 10; ++k) {
-            unsigned char c = msg[i+k];
-            if (c < 0x20 || c > 0x7E) { ok = false; break; }
-        }
-        if (ok) return std::string((const char*)&msg[i], 10);
+        return clean_ascii_10(reinterpret_cast<const char*>(msg.data()) + 6 + 145);
     }
     return "Voice";
 }
 
-
-// checksum = (128 - (sum & 0x7F)) & 0x7F
-unsigned char yamaha_checksum(const unsigned char* data, size_t len)
+static unsigned char yamaha_checksum(const unsigned char* data, size_t len)
 {
+    // checksum = (128 - (sum & 0x7F)) & 0x7F
     unsigned int sum = 0;
-    for (size_t i = 0; i < len; ++i)
+    for (size_t i = 0; i < len; ++i) {
         sum += data[i];
+    }
     return unsigned char((128 - (sum & 0x7F)) & 0x7F);
 }
 
-// Unpack one 128-unsigned char bank chunk → 155 single-voice parameter bytes (no header/checksum yet)
-std::vector<unsigned char> dx7_chunk128_to_param155(const unsigned char* c)
+static std::vector<unsigned char> dx7_chunk128_to_param155(const unsigned char* c)
 {
+    // Unpack one 128-unsigned char bank chunk → 155 single-voice parameter bytes (no header/checksum yet)
     std::vector<unsigned char> P;
     P.reserve(155);
 
@@ -196,9 +194,9 @@ std::vector<unsigned char> dx7_chunk128_to_param155(const unsigned char* c)
     return P;
 }
 
-// Build full single-voice SysEx from 155 params (adds header+checksum+F7)
-std::vector<unsigned char> build_single_voice_sysex_from_params(const std::vector<unsigned char>& params155, int midiChannel /*0..15*/ = 0)
+static std::vector<unsigned char> build_single_voice_sysex_from_params(const std::vector<unsigned char>& params155, int midiChannel /*0..15*/ = 0)
 {
+    // Build full single-voice SysEx from 155 params (adds header+checksum+F7)
     std::vector<unsigned char> msg;
     msg.reserve(1 + 1 + 1 + 1 + 2 + 155 + 1 + 1);
     msg.push_back(0xF0);
@@ -251,11 +249,13 @@ std::vector<std::filesystem::path> load_sysex_banks_recursive(const std::filesys
             continue;
         auto ext = it->path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-        if (ext == ".syx")
+        if (ext == ".syx") {
+            const std::filesystem::path _path = it->path();
             files.push_back(it->path());
+        }
     }
-    std::sort(files.begin(), files.end(),
-        [](const auto& a, const auto& b) { return a.generic_string() < b.generic_string(); });
+    // std::sort(files.begin(), files.end(),
+    //     [](const auto& a, const auto& b) { return a.generic_string() < b.generic_string(); });
 
     return files;
 }
@@ -265,9 +265,10 @@ std::vector<sysex_patch> load_sysex_patches(const std::filesystem::path& bank)
     std::vector<sysex_patch> out;
 
     // Read file and split into ALL sysex messages
-    auto raw  = read_all(bank);
+    auto raw = read_all(bank);
     auto msgs = split_sysex_all(raw);
-    if (msgs.empty()) return out;
+    if (msgs.empty())
+        return out;
 
     int single_voice_index = 0;
     int other_index = 0;
@@ -287,9 +288,9 @@ std::vector<sysex_patch> load_sysex_patches(const std::filesystem::path& bank)
             const size_t data_off = 6;
             const unsigned char* data = msg.data() + data_off;
             for (int i = 0; i < 32; ++i) {
-                const unsigned char* chunk = data + i*128;
-                auto params   = dx7_chunk128_to_param155(chunk);
-                auto patchMsg = build_single_voice_sysex_from_params(params, /*channel*/0);
+                const unsigned char* chunk = data + i * 128;
+                auto params = dx7_chunk128_to_param155(chunk);
+                auto patchMsg = build_single_voice_sysex_from_params(params, /*channel*/ 0);
 
                 sysex_patch p;
                 p.name = name_from_chunk(chunk);

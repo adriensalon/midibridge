@@ -7,8 +7,8 @@
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <chrono>
-#include <thread>
 #include <iostream>
+#include <thread>
 
 // clang-format off
 #define IMGUID_CONCAT(lhs, rhs) lhs # rhs
@@ -27,6 +27,12 @@ static std::size_t setup_selected_hardware_port = 0;
 static std::vector<std::string> setup_detected_hardware_ports;
 static std::string setup_virtual_port_name = "MIDI Bridge";
 static std::string setup_library_directory = "Path to the directory...";
+
+static std::vector<std::filesystem::path> library_banks;
+static std::vector<sysex_patch> library_patches;
+static int library_selected_bank_index = -1;
+static int library_selected_patch_index = -1;
+static int library_patches_cached_bank = -1;
 
 void draw_setup_text(const float modal_width)
 {
@@ -98,6 +104,7 @@ void draw_setup_start_control()
         open_virtual_input(setup_virtual_port_name, [](const std::vector<unsigned char>& data) {
             send_to_hardware_output(data);
         });
+        library_banks = load_sysex_banks_recursive(setup_library_directory);
         is_setup_finished = true;
         ImGui::CloseCurrentPopup();
     }
@@ -132,79 +139,76 @@ void draw_library_window()
     if (is_setup_finished) {
         if (ImGui::Begin(IMGUID("Library"))) {
 
-            static int selectedBank, selectedPatch = -1;
-            static std::vector<std::filesystem::path> _banks = load_sysex_banks_recursive(setup_library_directory);
+            const ImGuiTableFlags _table_flags = ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg;
+            const float _table_height = ImGui::GetContentRegionAvail().y;
+            if (ImGui::BeginTable(IMGUIDU, 1, _table_flags, ImVec2(-FLT_MIN, _table_height))) {
+                ImGui::TableSetupColumn(IMGUIDU, ImGuiTableColumnFlags_WidthStretch);
 
-            ImGuiTableFlags tblFlags = ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV;
-
-            const float tableH = ImGui::GetContentRegionAvail().y; // fill remaining space
-            if (ImGui::BeginTable("SysexBanksTable", 2, tblFlags, ImVec2(-FLT_MIN, tableH))) {
-                ImGui::TableSetupColumn("Bank / Patches", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("# / Size", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-                ImGui::TableHeadersRow();
-
-                for (int i = 0; i < (int)_banks.size(); ++i) {
-                    const std::string bank = _banks[i].filename().string();
-
-                    // --- bank row ---
+                for (int _bank_index = 0; _bank_index < static_cast<int>(library_banks.size()); ++_bank_index) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
 
-                    // Use a TreeNode in column 0 for the expand arrow
-                    ImGuiTreeNodeFlags tflags = ImGuiTreeNodeFlags_SpanFullWidth | ImGuiTreeNodeFlags_FramePadding;
-                    if (selectedBank == i && selectedPatch == -1)
-                        tflags |= ImGuiTreeNodeFlags_Selected;
-
-                    // Use a stable ID separate from the label (pointer-as-ID pattern)
-                    bool open = ImGui::TreeNodeEx((void*)(intptr_t)(i + 1), tflags, "%s", bank.c_str());
-
-                    // Column 1: patch count
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::Text("%d", 32);
-
-                    // Row click selection behavior for the bank itself
-                    // (clicking the label toggles the node, clicking empty row selects)
-                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen()) {
-                        selectedBank = i;
-                        selectedPatch = -1;
-                        
+                    const bool _is_bank_selected = (library_selected_bank_index == _bank_index);
+                    ImGuiTreeNodeFlags _tree_node_flags = ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_SpanFullWidth | ImGuiTreeNodeFlags_OpenOnArrow;
+                    if (_is_bank_selected && library_selected_patch_index == -1) {
+                        _tree_node_flags |= ImGuiTreeNodeFlags_Selected;
                     }
 
-                    // --- patch rows when expanded ---
-                    if (open) {
-                        std::vector<sysex_patch> _patches = load_sysex_patches(_banks[selectedBank]);
-                        for (int j = 0; j < _patches.size(); ++j) {
-                            const auto& patch = _patches[j];
+                    ImGui::SetNextItemOpen(_is_bank_selected, ImGuiCond_Always);
+                    const std::string _bank_name = library_banks[_bank_index].string();
+                    const bool _is_bank_open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(_bank_index + 1)), _tree_node_flags, "%s", _bank_name.c_str());
+
+                    if (ImGui::IsItemToggledOpen()) {
+                        if (_is_bank_open) {
+                            library_selected_bank_index = _bank_index;
+                            library_selected_patch_index = -1;
+                        } else if (_is_bank_selected) {
+                            library_selected_bank_index = -1;
+                            library_selected_patch_index = -1;
+                        }
+                    } else if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                        if (!_is_bank_selected) {
+                            library_selected_bank_index = _bank_index;
+                            library_selected_patch_index = -1;
+                        } else {
+                            library_selected_bank_index = -1;
+                            library_selected_patch_index = -1;
+                        }
+                    }
+
+                    if (library_selected_bank_index != library_patches_cached_bank) {
+                        if (library_selected_bank_index >= 0) {
+                            library_patches = load_sysex_patches(library_banks[library_selected_bank_index]);
+                        } else {
+                            library_patches.clear();
+                        }
+                        library_patches_cached_bank = library_selected_bank_index;
+                    }
+
+                    if (_is_bank_open) {
+                        for (int _patch_index = 0; _patch_index < static_cast<int>(library_patches.size()); ++_patch_index) {
+                            const sysex_patch& _patch = library_patches[_patch_index];
 
                             ImGui::TableNextRow();
                             ImGui::TableSetColumnIndex(0);
-
-                            // Leaf-style row (aligned with tree indent), selectable
-                            ImGuiTreeNodeFlags leaf = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanFullWidth;
-                            if (selectedBank == i && selectedPatch == j)
-                                leaf |= ImGuiTreeNodeFlags_Selected;
-
-                            // unique ID for the leaf (combine bank+patch indices)
-                            const intptr_t leafId = ((intptr_t)(i + 1) << 16) | (intptr_t)j;
-                            ImGui::TreeNodeEx((void*)leafId, leaf, "%s", patch.name.c_str());
-                            if (ImGui::IsItemClicked()) {
-                                selectedBank = i;
-                                selectedPatch = j;
-                                send_to_hardware_output(_patches[selectedPatch].data);
+                            ImGuiTreeNodeFlags _leaf_flags = ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanFullWidth;
+                            if (library_selected_bank_index == _bank_index && library_selected_patch_index == _patch_index) {
+                                _leaf_flags |= ImGuiTreeNodeFlags_Selected;
                             }
 
-                            ImGui::TableSetColumnIndex(1);
-                            ImGui::Text("%zu B", patch.data.size());
+                            const intptr_t leafId = (static_cast<intptr_t>(_bank_index + 1) << 16) | static_cast<intptr_t>(_patch_index);
+                            ImGui::TreeNodeEx(reinterpret_cast<void*>(leafId), _leaf_flags, "%s", _patch.name.c_str());
+                            if (ImGui::IsItemClicked()) {
+                                library_selected_bank_index = _bank_index;
+                                library_selected_patch_index = _patch_index;
+                                send_to_hardware_output(library_patches[library_selected_patch_index].data);
+                            }
                         }
-
-                        ImGui::TreePop(); // close bank node
+                        ImGui::TreePop();
                     }
                 }
-
                 ImGui::EndTable();
             }
-
-
             ImGui::End();
         }
     }
