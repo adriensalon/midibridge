@@ -275,6 +275,23 @@ static void load_vtmidi_library()
     }
 }
 
+static void remove_last_word_inplace(std::string& s)
+{
+    const char* _whitespace = " \t\n\r\f\v";
+    const std::size_t _end = s.find_last_not_of(_whitespace);
+    if (_end == std::string::npos) {
+        s.clear();
+        return;
+    }
+    s.erase(_end + 1);
+    const std::size_t _separator = s.find_last_of(_whitespace);
+    if (_separator == std::string::npos) {
+        s.clear();
+        return;
+    }
+    s.erase(_separator);
+}
+
 }
 
 std::vector<std::string> get_hardware_ports()
@@ -283,6 +300,7 @@ std::vector<std::string> get_hardware_ports()
     _hardware_ports.resize(hardware_midiout.getPortCount());
     for (unsigned int _index = 0; _index < _hardware_ports.size(); ++_index) {
         _hardware_ports[_index] = hardware_midiout.getPortName(_index);
+        remove_last_word_inplace(_hardware_ports[_index]);
     }
     return _hardware_ports;
 }

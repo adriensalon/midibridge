@@ -25,7 +25,7 @@ static bool is_setup_modal_shown = false;
 static const char* setup_modal_id = IMGUID("Setup");
 static std::size_t setup_selected_hardware_port = 0;
 static std::vector<std::string> setup_detected_hardware_ports;
-static std::string setup_virtual_port_name = "MIDI Bridge";
+static std::string setup_virtual_port_name = "DX7 MIDI Bridge";
 static std::string setup_library_directory = "Path to the directory...";
 static std::vector<std::filesystem::path> library_banks;
 static std::vector<sysex_patch> library_patches;
@@ -161,7 +161,7 @@ void draw_library_window()
                     }
 
                     ImGui::SetNextItemOpen(_is_bank_selected, ImGuiCond_Always);
-                    const std::string _bank_name = library_banks[_bank_index].string();
+                    const std::string _bank_name = std::filesystem::relative(library_banks[_bank_index], setup_library_directory).string();
                     const bool _is_bank_open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(_bank_index + 1)), _tree_node_flags, "%s", _bank_name.c_str());
 
                     if (ImGui::IsItemToggledOpen()) {
@@ -232,7 +232,11 @@ void draw_edit_window()
 
 void draw_main_window()
 {
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(0, 0));
     draw_setup_modal();
     draw_library_window();
     // draw_edit_window();
+    ImGui::PopStyleVar(3);
 }
